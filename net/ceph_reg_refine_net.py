@@ -19,9 +19,10 @@ from torch.nn import functional as F
 import torch.utils.model_zoo as model_zoo
 from timm.models.vision_transformer import Block
 from functools import partial
-from net.transformer import get_2d_sincos_pos_embed, PositionalEncoding
+from net.pos_embdb import get_2d_sincos_pos_embed, PositionalEncoding
+from net.HighResolutionNet import HRNet_W32_C
 from torch.nn.init import normal_
-from net.reg_loss import RLELoss
+from net.regression_loss import RLELoss
 from config import  config as cfg
 
 BN_MOMENTUM = 0.1
@@ -203,15 +204,16 @@ resnet_spec = {18: (BasicBlock, [2, 2, 2, 2]),
                50: (Bottleneck, [3, 4, 6, 3]),
                101: (Bottleneck, [3, 4, 16, 3]),
                152: (Bottleneck, [3, 8, 36, 3])}
-class ResNet(nn.Module):
+class PoseResNet(nn.Module):
 
-    def __init__(self, num_layers):
-        super(ResNet, self).__init__()
+    def __init__(self, num_layers, heads, head_conv):
+        super(PoseResNet, self).__init__()
         block, layers = resnet_spec[num_layers]
         self.inplanes = 64
+        self.heads = heads
         self.deconv_with_bias = False
 
-        super(ResNet, self).__init__()
+        super(PoseResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64, momentum=BN_MOMENTUM)
@@ -292,15 +294,14 @@ class Linear_with_norm(nn.Module):
 
 class get_model(nn.Module):
 
-    def __init__(self, num_layers, NLayer1=4, NLayer2=4, numchannel=512):
+    def __init__(self, num_layers, heads, head_conv=256, NLayer1=4, NLayer2=4):
         super(get_model, self).__init__()
         numchannel = 512
         self.NLayer1 = NLayer1
         self.NLayer = NLayer2
-        self.outchannel = 512
-        self.numchannel = numchannel
 
-        model = ResNet(num_layers)
+
+        model = PoseResNet(num_layers, heads, head_conv=head_conv)
         model.init_weights(num_layers)
         self.backone = model
 
@@ -310,55 +311,55 @@ class get_model(nn.Module):
         self.sizem = torch.tensor([32, 32]).int()
         self.grid_vx = torch.zeros((1, 2, self.sizem[0], self.sizem[1])).cuda().float()
         self.grid_vy = torch.zeros((1, 2, self.sizem[0], self.sizem[1])).cuda().float()
-        self.cls_embed = nn.Parameter(torch.zeros(1, 19, self.numchannel), requires_grad=False)
+        self.encoder_embed = nn.Parameter(torch.zeros(1, 19, numchannel), requires_grad=False)
 
-        self.conv1 = nn.Conv2d(in_channels=self.outchannel//8, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv2 = nn.Conv2d(in_channels=self.outchannel//4, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv3 = nn.Conv2d(in_channels=self.outchannel//2, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv4 = nn.Conv2d(in_channels=self.outchannel//1, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(self.numchannel, momentum=BN_MOMENTUM)
-        self.bn2 = nn.BatchNorm2d(self.numchannel, momentum=BN_MOMENTUM)
-        self.bn3 = nn.BatchNorm2d(self.numchannel, momentum=BN_MOMENTUM)
-        self.bn4 = nn.BatchNorm2d(self.numchannel, momentum=BN_MOMENTUM)
-        self.conv5 = nn.Conv2d(in_channels=self.outchannel//8, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv6 = nn.Conv2d(in_channels=self.outchannel//4, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv7 = nn.Conv2d(in_channels=self.outchannel//2, out_channels=self.numchannel, kernel_size=1, stride=1, bias=False)
-        self.conv8 = nn.Conv2d(in_channels=self.outchannel // 1, out_channels=self.numchannel, kernel_size=1, stride=1,bias=False)
+        self.conv1 = nn.Conv2d(in_channels=64, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+        self.conv2 = nn.Conv2d(in_channels=128, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+        self.conv3 = nn.Conv2d(in_channels=256, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(numchannel, momentum=BN_MOMENTUM)
+        self.bn2 = nn.BatchNorm2d(numchannel, momentum=BN_MOMENTUM)
+        self.bn3 = nn.BatchNorm2d(numchannel, momentum=BN_MOMENTUM)
+        self.conv4 = nn.Conv2d(in_channels=64, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+        self.conv5 = nn.Conv2d(in_channels=128, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+        self.conv6 = nn.Conv2d(in_channels=256, out_channels=numchannel, kernel_size=1, stride=1, bias=False)
+
 
         self.inintv = nn.Parameter(torch.tensor([1.0]), requires_grad=True)
         self.pg = nn.Parameter(torch.tensor([1, 0.8, 0.6, 0.4]), requires_grad=True)
         self.wg = nn.Parameter(torch.tensor([1, 0.8, 0.6, 0.4]), requires_grad=True)
         self.wcl = nn.Parameter(torch.tensor([1, 0.8, 0.6, 0.4]), requires_grad=True)
-        self.pos1 = nn.Parameter(torch.zeros(1, self.sizem[0] * 8,self.sizem[1]*8, self.outchannel//8), requires_grad=False)
-        self.pos2 = nn.Parameter(torch.zeros(1, self.sizem[0] * 4,self.sizem[1]*4, self.outchannel//4), requires_grad=False)
-        self.pos3 = nn.Parameter(torch.zeros(1, self.sizem[0] * 2,self.sizem[1]*2, self.outchannel//2), requires_grad=False)
-        self.pos4 = nn.Parameter(torch.zeros(1, self.sizem[0] *self.sizem[1], self.outchannel), requires_grad=False)  # fixed sin-cos embedding
+        self.pos_embedly1 = nn.Parameter(torch.zeros(1, self.sizem[0] * 8,self.sizem[1]*8, numchannel//8), requires_grad=False)
+        self.pos_embedly2 = nn.Parameter(torch.zeros(1, self.sizem[0] * 4,self.sizem[1]*4, numchannel//4), requires_grad=False)
+        self.pos_embedly3 = nn.Parameter(torch.zeros(1, self.sizem[0] * 2,self.sizem[1]*2, numchannel//2), requires_grad=False)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.sizem[0] *self.sizem[1], numchannel), requires_grad=False)  # fixed sin-cos embedding
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
 
         self.InitBlock = nn.ModuleList([
-            Block(dim=self.numchannel, num_heads=self.numchannel//64, mlp_ratio=2, qkv_bias=True, norm_layer=norm_layer)
+            Block(dim=numchannel, num_heads=numchannel//64, mlp_ratio=2, qkv_bias=True, norm_layer=norm_layer)
             for i in range(self.NLayer1)])
         self.linear11 = nn.Linear(numchannel, 256)
         self.linear12 = nn.Linear(256, 4)
 
         self.transblock = nn.ModuleList([
-            Block(dim=self.numchannel, num_heads=self.numchannel//64, mlp_ratio=2, qkv_bias=True, norm_layer=norm_layer)
+            Block(dim=numchannel, num_heads=numchannel//64, mlp_ratio=2, qkv_bias=True, norm_layer=norm_layer)
             for i in range(self.NLayer)])
+        # self.linear21 = nn.Linear(numchannel, 256)
+        # self.linear22 = nn.Linear(256, 4)
 
         fc_coord_branch = []
         for _ in range(2):
-            fc_coord_branch.append(nn.Linear(self.numchannel, self.numchannel))
+            fc_coord_branch.append(nn.Linear(numchannel, numchannel))
             fc_coord_branch.append(nn.ReLU())
-        fc_coord_branch.append(nn.Linear(self.numchannel, 2))
+        fc_coord_branch.append(nn.Linear(numchannel, 2))
         fc_coord_branch = nn.Sequential(*fc_coord_branch)
         self.fc_coord_branches = self._get_clones(fc_coord_branch, self.NLayer)
         self.fc_coord_output_branches = self._get_clones(fc_coord_branch, self.NLayer)
 
         fc_sigma_branch = []
         for _ in range(2):
-            fc_sigma_branch.append(nn.Linear(self.numchannel, self.numchannel))
-        fc_sigma_branch.append(Linear_with_norm(self.numchannel, 2, norm=False))
+            fc_sigma_branch.append(nn.Linear(numchannel, numchannel))
+        fc_sigma_branch.append(Linear_with_norm(numchannel, 2, norm=False))
         fc_sigma_branch = nn.Sequential(*fc_sigma_branch)
         self.fc_sigma_branches = self._get_clones(fc_sigma_branch, self.NLayer)
 
@@ -380,24 +381,26 @@ class get_model(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos1 = get_2d_sincos_pos_embed(self.pos1.shape[-1], self.sizem*8, cls_token=False)
-        pos1 = pos1.reshape(self.sizem[0]*8, self.sizem[1]*8, self.outchannel//8)
-        self.pos1.data.copy_(torch.from_numpy(pos1).float().unsqueeze(0))
+        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.sizem, cls_token=False)
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        pos2 = get_2d_sincos_pos_embed(self.pos2.shape[-1], self.sizem*4, cls_token=False)
-        pos2 = pos2.reshape(self.sizem[0] * 4, self.sizem[1] * 4, self.outchannel//4)
-        self.pos2.data.copy_(torch.from_numpy(pos2).float().unsqueeze(0))
+        pos_embedly1 = get_2d_sincos_pos_embed(self.pos_embedly1.shape[-1], self.sizem*8, cls_token=False)
+        pos_embedly1 = pos_embedly1.reshape(self.sizem[0]*8, self.sizem[1]*8, 64)
+        self.pos_embedly1.data.copy_(torch.from_numpy(pos_embedly1).float().unsqueeze(0))
 
-        pos3 = get_2d_sincos_pos_embed(self.pos3.shape[-1], self.sizem*2, cls_token=False)
-        pos3 = pos3.reshape(self.sizem[0] * 2, self.sizem[1] * 2, self.outchannel//2)
-        self.pos3.data.copy_(torch.from_numpy(pos3).float().unsqueeze(0))
 
-        pos4 = get_2d_sincos_pos_embed(self.pos4.shape[-1], self.sizem, cls_token=False)
-        self.pos4.data.copy_(torch.from_numpy(pos4).float().unsqueeze(0))
+        pos_embedly2 = get_2d_sincos_pos_embed(self.pos_embedly2.shape[-1], self.sizem*4, cls_token=False)
+        pos_embedly2 = pos_embedly2.reshape(self.sizem[0] * 4, self.sizem[1] * 4, 128)
+        self.pos_embedly2.data.copy_(torch.from_numpy(pos_embedly2).float().unsqueeze(0))
+
+        pos_embedly3 = get_2d_sincos_pos_embed(self.pos_embedly3.shape[-1], self.sizem*2, cls_token=False)
+        pos_embedly3 = pos_embedly3.reshape(self.sizem[0] * 2, self.sizem[1] * 2, 256)
+        self.pos_embedly3.data.copy_(torch.from_numpy(pos_embedly3).float().unsqueeze(0))
+
 
         device = torch.device("cuda")
-        cls_embed = PositionalEncoding(self.cls_embed.shape[1], self.cls_embed.shape[2], device)
-        self.cls_embed.data.copy_(cls_embed.float().unsqueeze(0))
+        pos_embed1 = PositionalEncoding(self.encoder_embed.shape[1], self.encoder_embed.shape[2], device)
+        self.encoder_embed.data.copy_(pos_embed1.float().unsqueeze(0))
 
     def _get_clones(self, module, N):
         return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
@@ -417,10 +420,95 @@ class get_model(nn.Module):
         layer1, layer2, layer3, output = self.backone(x)
         hotmap = self.out1(output)
 
+        b, c, h, w = output.shape
+        pos1 = self.pos_embedly1.expand(b, -1, -1, -1).permute(0, 3, 1, 2)
+        pos2 = self.pos_embedly2.expand(b, -1, -1, -1).permute(0, 3, 1, 2)
+        pos3 = self.pos_embedly3.expand(b, -1, -1, -1).permute(0, 3, 1, 2)
+
+        layer1 = self.bn1(self.conv1(F.interpolate(layer1, (self.sizem[0], self.sizem[1])))).view(b, c, h* w).permute(0, 2, 1)
+        layer2 = self.bn2(self.conv2(F.interpolate(layer2, (self.sizem[0], self.sizem[1])))).view(b, c, h* w).permute(0, 2, 1)
+        layer3 = self.bn3(self.conv3(F.interpolate(layer3, (self.sizem[0], self.sizem[1])))).view(b, c, h* w).permute(0, 2, 1)
 
 
+        pos1 = self.conv4(F.interpolate(pos1, (self.sizem[0], self.sizem[1]))).view(b, c, h* w).permute(0, 2, 1)
+        pos2 = self.conv5(F.interpolate(pos2, (self.sizem[0], self.sizem[1]))).view(b, c, h* w).permute(0, 2, 1)
+        pos3 = self.conv6(F.interpolate(pos3, (self.sizem[0], self.sizem[1]))).view(b, c, h* w).permute(0, 2, 1)
 
-        
+        layer1 = layer1 + pos1
+        layer2 = layer2 + pos2
+        layer3 = layer3 + pos3
+
+        x4 = output.view(b, c, h* w).permute(0, 2, 1)
+        sizes = [b, c, h, w]
+        #################################################################
+        inc = x4 + self.pos_embed.expand(b, -1, -1)
+        inc = torch.cat([inc,  self.encoder_embed.expand(b, -1, -1)], dim=1)
+        pos = torch.cat([self.pos_embed.expand(b, -1, -1), self.encoder_embed.expand(b, -1, -1)], dim=1)
+
+        xcs = []
+        for cpb in self.InitBlock:
+            inc = cpb(inc)
+            xcs.append(inc)
+            inc = inc+pos
+        output1 = self.linear12(F.relu(self.linear11(xcs[-1][:, -19:, :])))
+        #################################################################
+
+        # xc = (x4 + self.pos_embed.expand(b, -1, -1))
+        xc = (x4 + self.pos_embed.expand(b, -1, -1))*self.wg[0] + layer1*self.wg[1] + layer2*self.wg[2] + layer3*self.wg[3]
+        # inint_coords = get_proposal_pos_embed(output1[:, :, :2].detach(), num_pos_feats=512, temperature=10000)
+        output = x4 + self.pos_embed.expand(b, -1, -1)
+        inint_coords = get_cls_embed(layer1, layer2, layer3, output, output1[:, :, :2].detach(), sizes, self.wcl)
+
+        encoder_embed = self.encoder_embed.expand(b, -1, -1)  + inint_coords * self.inintv
+        # pos = torch.cat([self.pos_embed.expand(b, -1, -1),encoder_embed], dim=1)
+        # pos = torch.cat([self.pos_embed.expand(b, -1, -1) * self.pg[0] + pos1 * self.pg[1] + pos2 * self.pg[2] + pos3 * self.pg[3], encoder_embed], dim=1)
+
+        hs = []
+        inter_references = []
+        xc_ = torch.cat([xc, encoder_embed], dim=1)
+        reference_points = output1[:, :, :2].detach().clip(0, 1)
+        init_reference = reference_points
+        for i, cpb in enumerate(self.transblock):
+            xc_ = cpb(xc_)
+            tmp = self.fc_coord_branches[i](xc_[:, -cfg.PointNms:, :])
+
+            new_reference_points = tmp + inverse_sigmoid(reference_points)
+            new_reference_points = new_reference_points.sigmoid()
+
+            reference_points = new_reference_points
+
+            inint_coords = get_cls_embed(layer1, layer2, layer3, output, new_reference_points.detach(), sizes, self.wcl)
+            # inint_coords = get_proposal_pos_embed(new_reference_points.detach(), num_pos_feats=512, temperature=10000)
+            encoder_embed = self.encoder_embed.expand(b, -1, -1) + inint_coords * self.inintv
+            pos = torch.cat([self.pos_embed.expand(b, -1, -1) * self.pg[0] + pos1 * self.pg[1] + pos2 * self.pg[2] + pos3 * self.pg[3], encoder_embed], dim=1)
+            xc_ = xc_ + pos
+
+            inter_references.append(reference_points)
+            hs.append(xc_[:, -cfg.PointNms:, :])
+        outputs = []
+        for lvl in range(len(inter_references)):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+
+            tmp = self.fc_coord_branches[lvl](hs[lvl])
+            tmp = tmp + reference
+
+
+            outputs_sigma = self.fc_sigma_branches[lvl](hs[lvl])
+
+
+            outputs_coord = tmp.sigmoid()
+            delta_coord_output = self.fc_coord_output_branches[lvl](hs[lvl])
+            outputs_coord = (outputs_coord + delta_coord_output)
+
+            outputs_coord = torch.cat([outputs_coord, outputs_sigma], dim=-1)
+            outputs.append(outputs_coord)
+
+        # output = F.relu(self.linear21(xcs[-1][:, -encoder_embed.shape[1]:, :]))
+        # output = self.linear22(output)
 
 
         return outputs, output1, hotmap
@@ -431,4 +519,4 @@ if __name__ == "__main__":
     num_layers =34
     head_conv = 256
     heads = {'hm': 1, 'class': cfg.PointNms}
-    model = ResNet(num_layers, heads, head_conv=head_conv)
+    model = PoseResNet(num_layers, heads, head_conv=head_conv)
