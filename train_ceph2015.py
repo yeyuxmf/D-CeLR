@@ -59,7 +59,10 @@ def train(args, io):
 
     # Try to load models
     num_layers =34
-    model = get_model(num_layers=num_layers, NLayer1=4, NLayer2=4, numchannel=512)
+    head_conv = 256
+    heads = {'hm': 1, 'class': cfg.PointNms}
+    model = get_model(num_layers=num_layers, heads=heads, head_conv=head_conv, NLayer1=4, NLayer2=4)
+  
 
     # model = nn.DataParallel(model)
     print("Let's use", torch.cuda.device_count(), "GPUs!")
